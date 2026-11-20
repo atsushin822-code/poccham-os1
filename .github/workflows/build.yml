@@ -80,7 +80,7 @@ jobs:
 
       - name: Show host
         run: |
-          live-build --version || lb --version || true
+          lb --version 2>&1 | head -n 5 || live-build --version 2>&1 | head -n 5 || true
           mksquashfs -version 2>&1 | head -n 5
           debootstrap --version 2>&1 | head -n 5
           xorriso -version 2>&1 | head -n 10
@@ -89,39 +89,54 @@ jobs:
       - name: Build ISO (lb build)
         working-directory: live-ohd
         run: |
-          set -eux
+          set -euxo pipefail
           df -h
-          # live-build は root 権限が必要。tee でログを残す
+          # live-build は root 権限が必要。pipefailで lb の失敗を検出
           sudo lb build 2>&1 | tee build.log
           echo "=== BUILD DONE ==="
-          ls -lh *.iso *.img 2>&1 | head -n 20
-          sha256sum *.iso | tee SHA256SUMS
+          ls -lh ./*.iso ./*.img 2>&1 | head -n 20
+          # ISOが1つも無ければログを出して失敗させる
+          if ! ls -1 ./*.iso >/dev/null 2>&1; then
+            echo "::error::lb build succeeded but no .iso found - dumping build.log tail"
+            tail -n 200 build.log || true
+            ls -R . 2>&1 | head -n 100
+            exit 1
+          fi
+          sha256sum ./*.iso | tee SHA256SUMS
           cat SHA256SUMS
 
       - name: Check ISO is bootable
+        if: always()
         working-directory: live-ohd
         run: |
           set -eux
-          ISO=$(ls -1 *.iso | head -n1)
+          if ! ls -1 ./*.iso >/dev/null 2>&1; then
+            echo "No ISO found, skipping boot check (see previous step log)"
+            exit 0
+          fi
+          ISO=$(ls -1 ./*.iso | head -n1)
           echo "ISO=$ISO"
-          # isohybrid + UEFI/BIOS 両対応かを確認
-          isohybrid --help 2>&1 | head -n 5 || true
+          # isohybrid + UEFI/BIOS 両対応かを確認 (無ければスキップ)
           xorriso -indev "$ISO" -toc 2>&1 | head -n 40 || true
-          # xorriso / isoinfo でブートカタログ有無
           xorriso -report_el_torito plain -indev "$ISO" 2>&1 | head -n 80 || true
           fdisk -l "$ISO" 2>&1 | head -n 40 || true
 
       - name: Split if huge (Drive 100MB対策の参考)
+        if: always()
         working-directory: live-ohd
         run: |
           set -eux
-          ISO=$(ls -1 *.iso | head -n1)
+          if ! ls -1 ./*.iso >/dev/null 2>&1; then
+            echo "No ISO to measure"
+            exit 0
+          fi
+          ISO=$(ls -1 ./*.iso | head -n1)
           ls -lh "$ISO"
-          # 2GB超でも Artifact は上げられるが、ログ用にサイズだけ出す
           du -h "$ISO"
           wc -c "$ISO"
 
       - name: Upload ISO artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: live-image-amd64-hybrid-iso
@@ -129,7 +144,7 @@ jobs:
             live-ohd/*.iso
             live-ohd/SHA256SUMS
             live-ohd/build.log
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 14
           compression-level: 0
 
